@@ -112,38 +112,90 @@ db_config = {
     'charset': 'utf8mb4'
 }
 
+# 全局缓存：按 device_id 缓存未合并数据
+cache_data = {}
+from datetime import datetime  # ✅ 你漏掉了这一行
 @app.route('/iot-data', methods=['POST'])
 def receive_iot_data():
     try:
-        print("📥 Headers:", dict(request.headers), flush=True)
         data = request.get_json()
         print("📦 接收到设备数据:", data, flush=True)
 
-        # ✅ 修复这里：深入嵌套结构取 services
-        services = data.get('notify_data', {}).get('body', {}).get('services', [])
-        if not services:
-            return jsonify({'error': 'No service data'}), 400
+        notify = data.get('notify_data', {})
+        device_id = notify.get('header', {}).get('device_id', 'unknown_device')
+        services = notify.get('body', {}).get('services', [])
 
-        props = services[0].get('properties', {})
-        keys = list(props.keys())
-        values = [props.get(k, None) for k in keys]
+        if not device_id or not services:
+            return jsonify({'error': 'Missing device_id or services'}), 400
 
-        placeholders = ', '.join(['%s'] * len(keys))
-        columns = ', '.join(keys)
-        sql = f"INSERT INTO device_data ({columns}) VALUES ({placeholders})"
+        service = services[0]
+        props = service.get('properties', {})
+        if not props:
+            return jsonify({'error': 'Missing properties'}), 400
 
-        # 插入数据库
-        connection = pymysql.connect(**db_config)
-        with connection.cursor() as cursor:
-            cursor.execute(sql, values)
-        connection.commit()
-        connection.close()
+        # 初始化缓存结构
+        if device_id not in cache_data:
+            cache_data[device_id] = {}
 
-        return jsonify({'status': 'success', 'inserted': keys})
+        # 字段分类识别
+        sensor_keys = {
+            "temperature_indoor", "humidity_indoor", "smoke", "comb",
+            "light", "current", "voltage", "power"
+        }
+        home_keys = {
+            "door_state", "airConditioner_state", "curtain_percent", "led_lightness_color"
+        }
+
+        sensor_data = {k: v for k, v in props.items() if k in sensor_keys}
+        home_data = {k: v for k, v in props.items() if k in home_keys}
+
+        if sensor_data:
+            cache_data[device_id]['sensor'] = sensor_data
+        if home_data:
+            cache_data[device_id]['home'] = home_data
+
+        print(f"🔄 当前缓存: {cache_data[device_id]}", flush=True)
+
+        # ✅ 合并条件满足时写入数据库
+        if 'sensor' in cache_data[device_id] and 'home' in cache_data[device_id]:
+            merged = {**cache_data[device_id]['sensor'], **cache_data[device_id]['home']}
+            print(f"✅ 数据合并并写入数据库: {merged}", flush=True)
+
+            keys = list(merged.keys())
+            values = [merged[k] for k in keys]
+            columns = ', '.join(keys + ['created_at'])
+            placeholders = ', '.join(['%s'] * len(keys) + ['%s'])
+            values.append(datetime.now())
+
+            sql = f"INSERT INTO device_data ({columns}) VALUES ({placeholders})"
+
+            # 执行数据库写入
+            try:
+                conn = pymysql.connect(**db_config)
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, values)
+                conn.commit()
+                conn.close()
+            except Exception as db_error:
+                print("❌ 写入数据库失败:", db_error, flush=True)
+                return jsonify({'error': str(db_error)}), 500
+
+            # 清除缓存
+            del cache_data[device_id]
+
+            return jsonify({'status': 'success', 'inserted': keys})
+
+        # 等待另一类数据
+        return jsonify({
+            'status': 'waiting',
+            'cached_keys': list(cache_data[device_id].keys())
+        })
 
     except Exception as e:
+        print("❌ 接口异常:", e, flush=True)
         return jsonify({'error': str(e)}), 500
 
+# === 数据库增删改查接口 ===
 
 # === 启动 Flask 应用 ===
 if __name__ == '__main__':
