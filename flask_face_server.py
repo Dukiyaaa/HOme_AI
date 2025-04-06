@@ -157,17 +157,26 @@ def receive_iot_data():
         if device_id not in cache_data:
             cache_data[device_id] = {}
 
-        # 字段分类识别
-        sensor_keys = {
-            "temperature_indoor", "humidity_indoor", "smoke", "comb",
-            "light", "current", "voltage", "power"
-        }
-        home_keys = {
-            "door_state", "airConditioner_state", "curtain_percent", "led_lightness_color"
+        all_fields = {
+            "temperature_indoor", "humidity_indoor", "smoke", "comb", "light",
+            "current", "voltage", "power", "sr501_state","beep_state",
+            "door_state", "airConditioner_state", "curtain_percent", "led_lightness_color",
+            "automation_mode_scene"
         }
 
+        # 按功能拆分字段（可选）
+        sensor_keys = {
+            "temperature_indoor", "humidity_indoor", "smoke", "comb",
+            "light", "current", "voltage", "power", "sr501_state","beep_state"
+        }
+        home_keys = {
+            "door_state", "airConditioner_state", "curtain_percent", "led_lightness_color", "automation_mode_scene"
+        }
+
+        # 数据提取时：
         sensor_data = {k: v for k, v in props.items() if k in sensor_keys}
         home_data = {k: v for k, v in props.items() if k in home_keys}
+
 
         if sensor_data:
             cache_data[device_id]['sensor'] = sensor_data
