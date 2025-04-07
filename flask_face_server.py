@@ -264,7 +264,7 @@ def get_data_by_id(id):
     try:
         conn = pymysql.connect(**db_config)
         with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            cursor.execute("SELECT * FROM device_data WHERE id=%s", (id,))
+            cursor.execute("SELECT * FROM device_data WHERE device_data_id=%s", (id,))
             row = cursor.fetchone()
         conn.close()
         if row:
@@ -282,7 +282,7 @@ def update_data(id):
         values = list(payload.values())
         values.append(id)
 
-        sql = f"UPDATE device_data SET {updates} WHERE id=%s"
+        sql = f"UPDATE device_data SET {updates} WHERE device_data_id=%s"
 
         conn = pymysql.connect(**db_config)
         with conn.cursor() as cursor:
@@ -299,7 +299,7 @@ def delete_data(id):
     try:
         conn = pymysql.connect(**db_config)
         with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM device_data WHERE id=%s", (id,))
+            cursor.execute("DELETE FROM device_data WHERE device_data_id=%s", (id,))
         conn.commit()
         conn.close()
         return jsonify({'status': 'deleted', 'id': id})
