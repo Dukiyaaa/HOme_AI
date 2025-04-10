@@ -134,7 +134,50 @@ db_config = {
 
 # 全局缓存：按 device_id 缓存未合并数据
 cache_data = {}
-from datetime import datetime  # ✅ 你漏掉了这一行
+from datetime import datetime
+import csv
+import os
+
+# 导出阈值设置
+MAX_ROWS = 10000
+ARCHIVE_FOLDER = 'data_archives'
+os.makedirs(ARCHIVE_FOLDER, exist_ok=True)
+
+def export_and_clear_device_data():
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT COUNT(*) AS total FROM device_data")
+            row_count = cursor.fetchone()["total"]
+            if row_count < MAX_ROWS:
+                return
+
+            print(f"⚠️ 数据量达到 {row_count} 条，导出 CSV 并清空！", flush=True)
+
+            cursor.execute("SELECT * FROM device_data ORDER BY created_at ASC")
+            rows = cursor.fetchall()
+
+            if rows:
+                now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"device_data_backup_{now_str}.csv"
+                full_path = os.path.join(ARCHIVE_FOLDER, filename)
+
+                with open(full_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+                print(f"✅ 已备份至 {full_path}", flush=True)
+
+            cursor.execute("TRUNCATE TABLE device_data")
+            conn.commit()
+            print("✅ 已清空 device_data 表", flush=True)
+
+        conn.close()
+    except Exception as e:
+        print("❌ 导出并清空失败：", e, flush=True)
+
+
 @app.route('/iot-data', methods=['POST'])
 def receive_iot_data():
     try:
@@ -157,26 +200,16 @@ def receive_iot_data():
         if device_id not in cache_data:
             cache_data[device_id] = {}
 
-        all_fields = {
-            "temperature_indoor", "humidity_indoor", "smoke", "comb", "light",
-            "current", "voltage", "power", "sr501_state","beep_state",
-            "door_state", "airConditioner_state", "curtain_percent", "led_lightness_color",
-            "automation_mode_scene"
-        }
-
-        # 按功能拆分字段（可选）
         sensor_keys = {
             "temperature_indoor", "humidity_indoor", "smoke", "comb",
-            "light", "current", "voltage", "power", "sr501_state","beep_state"
+            "light", "current", "voltage", "power", "sr501_state", "beep_state"
         }
         home_keys = {
             "door_state", "airConditioner_state", "curtain_percent", "led_lightness_color", "automation_mode_scene"
         }
 
-        # 数据提取时：
         sensor_data = {k: v for k, v in props.items() if k in sensor_keys}
         home_data = {k: v for k, v in props.items() if k in home_keys}
-
 
         if sensor_data:
             cache_data[device_id]['sensor'] = sensor_data
@@ -185,7 +218,6 @@ def receive_iot_data():
 
         print(f"🔄 当前缓存: {cache_data[device_id]}", flush=True)
 
-        # ✅ 合并条件满足时写入数据库
         if 'sensor' in cache_data[device_id] and 'home' in cache_data[device_id]:
             merged = {**cache_data[device_id]['sensor'], **cache_data[device_id]['home']}
             print(f"✅ 数据合并并写入数据库: {merged}", flush=True)
@@ -198,23 +230,23 @@ def receive_iot_data():
 
             sql = f"INSERT INTO device_data ({columns}) VALUES ({placeholders})"
 
-            # 执行数据库写入
             try:
                 conn = pymysql.connect(**db_config)
                 with conn.cursor() as cursor:
                     cursor.execute(sql, values)
                 conn.commit()
                 conn.close()
+
+                # ✅ 插入后触发导出+清空
+                export_and_clear_device_data()
+
             except Exception as db_error:
                 print("❌ 写入数据库失败:", db_error, flush=True)
                 return jsonify({'error': str(db_error)}), 500
 
-            # 清除缓存
             del cache_data[device_id]
-
             return jsonify({'status': 'success', 'inserted': keys})
 
-        # 等待另一类数据
         return jsonify({
             'status': 'waiting',
             'cached_keys': list(cache_data[device_id].keys())
@@ -223,6 +255,7 @@ def receive_iot_data():
     except Exception as e:
         print("❌ 接口异常:", e, flush=True)
         return jsonify({'error': str(e)}), 500
+
 
 # === 数据库增删改查接口 ===
 @app.route('/data', methods=['POST'])
@@ -364,6 +397,406 @@ def export_data_as_csv():
             }
         )
 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# === device 表 CRUD 接口 ===
+
+@app.route('/device', methods=['POST'])
+def insert_device():
+    try:
+        payload = request.get_json()
+        keys = list(payload.keys())
+        values = [payload[k] for k in keys]
+
+        placeholders = ', '.join(['%s'] * len(keys))
+        columns = ', '.join(keys)
+        sql = f"INSERT INTO device ({columns}) VALUES ({placeholders})"
+
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'inserted', 'fields': keys}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/device', methods=['GET'])
+def get_all_device():
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM device")
+            rows = cursor.fetchall()
+        conn.close()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/device/<device_id>', methods=['GET'])
+def get_device_by_id(device_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM device WHERE device_id=%s", (device_id,))
+            row = cursor.fetchone()
+        conn.close()
+        return jsonify(row if row else {'error': 'Not found'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/device/<device_id>', methods=['PUT'])
+def update_device(device_id):
+    try:
+        payload = request.get_json()
+        updates = ', '.join([f"{k}=%s" for k in payload])
+        values = list(payload.values())
+        values.append(device_id)
+
+        sql = f"UPDATE device SET {updates} WHERE device_id=%s"
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'updated', 'device_id': device_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/device/<device_id>', methods=['DELETE'])
+def delete_device(device_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM device WHERE device_id=%s", (device_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'deleted', 'device_id': device_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# === command_log 表 CRUD 接口 ===
+
+@app.route('/command_log', methods=['POST'])
+def insert_command_log():
+    try:
+        payload = request.get_json()
+        keys = list(payload.keys())
+        values = [payload[k] for k in keys]
+
+        placeholders = ', '.join(['%s'] * len(keys))
+        columns = ', '.join(keys)
+        sql = f"INSERT INTO command_log ({columns}) VALUES ({placeholders})"
+
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'inserted', 'fields': keys}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/command_log', methods=['GET'])
+def get_all_command_log():
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM command_log")
+            rows = cursor.fetchall()
+        conn.close()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/command_log/<int:command_log_id>', methods=['GET'])
+def get_command_log_by_id(command_log_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM command_log WHERE command_log_id=%s", (command_log_id,))
+            row = cursor.fetchone()
+        conn.close()
+        return jsonify(row if row else {'error': 'Not found'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/command_log/<int:command_log_id>', methods=['PUT'])
+def update_command_log(command_log_id):
+    try:
+        payload = request.get_json()
+        updates = ', '.join([f"{k}=%s" for k in payload])
+        values = list(payload.values())
+        values.append(command_log_id)
+
+        sql = f"UPDATE command_log SET {updates} WHERE command_log_id=%s"
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'updated', 'command_log_id': command_log_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/command_log/<int:command_log_id>', methods=['DELETE'])
+def delete_command_log(command_log_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM command_log WHERE command_log_id=%s", (command_log_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'deleted', 'command_log_id': command_log_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# === alarm_event 表 CRUD 接口 ===
+
+@app.route('/alarm_event', methods=['POST'])
+def insert_alarm_event():
+    try:
+        payload = request.get_json()
+        keys = list(payload.keys())
+        values = [payload[k] for k in keys]
+
+        placeholders = ', '.join(['%s'] * len(keys))
+        columns = ', '.join(keys)
+        sql = f"INSERT INTO alarm_event ({columns}) VALUES ({placeholders})"
+
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'inserted', 'fields': keys}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/alarm_event', methods=['GET'])
+def get_all_alarm_event():
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM alarm_event")
+            rows = cursor.fetchall()
+        conn.close()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/alarm_event/<int:alarm_event_id>', methods=['GET'])
+def get_alarm_event_by_id(alarm_event_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM alarm_event WHERE alarm_event_id=%s", (alarm_event_id,))
+            row = cursor.fetchone()
+        conn.close()
+        return jsonify(row if row else {'error': 'Not found'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/alarm_event/<int:alarm_event_id>', methods=['PUT'])
+def update_alarm_event(alarm_event_id):
+    try:
+        payload = request.get_json()
+        updates = ', '.join([f"{k}=%s" for k in payload])
+        values = list(payload.values())
+        values.append(alarm_event_id)
+
+        sql = f"UPDATE alarm_event SET {updates} WHERE alarm_event_id=%s"
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'updated', 'alarm_event_id': alarm_event_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/alarm_event/<int:alarm_event_id>', methods=['DELETE'])
+def delete_alarm_event(alarm_event_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM alarm_event WHERE alarm_event_id=%s", (alarm_event_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'deleted', 'alarm_event_id': alarm_event_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# === face_whitelist 表 CRUD 接口 ===
+
+@app.route('/face_whitelist', methods=['POST'])
+def insert_face_whitelist():
+    try:
+        payload = request.get_json()
+        keys = list(payload.keys())
+        values = [payload[k] for k in keys]
+
+        placeholders = ', '.join(['%s'] * len(keys))
+        columns = ', '.join(keys)
+        sql = f"INSERT INTO face_whitelist ({columns}) VALUES ({placeholders})"
+
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'inserted', 'fields': keys}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/face_whitelist', methods=['GET'])
+def get_all_face_whitelist():
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM face_whitelist")
+            rows = cursor.fetchall()
+        conn.close()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/face_whitelist/<int:face_whitelist_id>', methods=['GET'])
+def get_face_whitelist_by_id(face_whitelist_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM face_whitelist WHERE face_whitelist_id=%s", (face_whitelist_id,))
+            row = cursor.fetchone()
+        conn.close()
+        return jsonify(row if row else {'error': 'Not found'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/face_whitelist/<int:face_whitelist_id>', methods=['PUT'])
+def update_face_whitelist(face_whitelist_id):
+    try:
+        payload = request.get_json()
+        updates = ', '.join([f"{k}=%s" for k in payload])
+        values = list(payload.values())
+        values.append(face_whitelist_id)
+
+        sql = f"UPDATE face_whitelist SET {updates} WHERE face_whitelist_id=%s"
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'updated', 'face_whitelist_id': face_whitelist_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/face_whitelist/<int:face_whitelist_id>', methods=['DELETE'])
+def delete_face_whitelist(face_whitelist_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM face_whitelist WHERE face_whitelist_id=%s", (face_whitelist_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'deleted', 'face_whitelist_id': face_whitelist_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# === emergency_contact 表 CRUD 接口 ===
+
+@app.route('/emergency_contact', methods=['POST'])
+def insert_emergency_contact():
+    try:
+        payload = request.get_json()
+        keys = list(payload.keys())
+        values = [payload[k] for k in keys]
+
+        placeholders = ', '.join(['%s'] * len(keys))
+        columns = ', '.join(keys)
+        sql = f"INSERT INTO emergency_contact ({columns}) VALUES ({placeholders})"
+
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'inserted', 'fields': keys}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/emergency_contact', methods=['GET'])
+def get_all_emergency_contact():
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM emergency_contact")
+            rows = cursor.fetchall()
+        conn.close()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/emergency_contact/<int:emergency_contact_id>', methods=['GET'])
+def get_emergency_contact_by_id(emergency_contact_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM emergency_contact WHERE emergency_contact_id=%s", (emergency_contact_id,))
+            row = cursor.fetchone()
+        conn.close()
+        return jsonify(row if row else {'error': 'Not found'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/emergency_contact/<int:emergency_contact_id>', methods=['PUT'])
+def update_emergency_contact(emergency_contact_id):
+    try:
+        payload = request.get_json()
+        updates = ', '.join([f"{k}=%s" for k in payload])
+        values = list(payload.values())
+        values.append(emergency_contact_id)
+
+        sql = f"UPDATE emergency_contact SET {updates} WHERE emergency_contact_id=%s"
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'updated', 'emergency_contact_id': emergency_contact_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/emergency_contact/<int:emergency_contact_id>', methods=['DELETE'])
+def delete_emergency_contact(emergency_contact_id):
+    try:
+        conn = pymysql.connect(**db_config)
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM emergency_contact WHERE emergency_contact_id=%s", (emergency_contact_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'deleted', 'emergency_contact_id': emergency_contact_id})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
