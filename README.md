@@ -21,7 +21,6 @@ source venv/bin/activate
 cd ~/face_detect
 9. 登录到数据库
 mysql -u root -p
-密码：123456
 10. 查看数据库
 USE home_database;
 11. 删除数据表数据
