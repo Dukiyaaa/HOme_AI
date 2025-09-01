@@ -4,7 +4,7 @@ HOme智能家居系统flask相关代码
 # 相关命令行指令
 1. 登录到服务器
 ssh ubuntu@43.155.36.236
-后面输入密码即可：大写开头
+后面输入密码即可
 2. 本地更新后的代码推到服务器
 scp flask_face_server.py ubuntu@43.155.36.236:/home/ubuntu/face_detect/ 
 3. 远端服务器查看进行的进程
